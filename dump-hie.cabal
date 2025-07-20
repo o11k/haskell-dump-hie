@@ -14,5 +14,6 @@ executable dump-hie
     import:           warnings
     main-is:          Main.hs
     build-depends:    base ^>=4.18.3.0
+                    , ghc
     hs-source-dirs:   app
     default-language: Haskell2010
