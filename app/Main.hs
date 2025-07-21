@@ -1,18 +1,24 @@
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE OverloadedStrings #-}
 module Main where
 
 import System.Environment (getProgName, getArgs)
 import System.Exit (die)
-import Data.Map (keys, elems, toList)
+import Data.Map (toList)
 import GHC.Iface.Ext.Binary (readHieFile, HieFileResult (..))
 import GHC.Types.Name.Cache (initNameCache)
-import GHC.Iface.Ext.Types (HieFile (..), HieASTs (..), HieAST (sourcedNodeInfo, nodeChildren), NodeInfo (..), SourcedNodeInfo (getSourcedNodeInfo), NodeOrigin (..), NodeAnnotation (nodeAnnotConstr, nodeAnnotType))
-import GHC.Data.FastString (unpackFS, LexicalFastString (..), FastString)
-import Control.Monad (when, forM_)
+import GHC.Iface.Ext.Types (HieFile (..), HieASTs (..), HieAST (..), NodeInfo (..), SourcedNodeInfo (getSourcedNodeInfo), NodeOrigin (..), NodeAnnotation (nodeAnnotConstr, nodeAnnotType, NodeAnnotation))
+import GHC.Data.FastString (unpackFS, LexicalFastString (..))
+import Control.Monad (when)
 import qualified Data.Set as Set
-import Data.List (intercalate)
+import Data.Aeson (Value (..), object, (.=), encode, ToJSON)
+import qualified Data.Aeson.Key as JKey
+import qualified Data.ByteString.Lazy.Char8 as BL
+import GHC.Unit.Types
+import GHC (ModuleName(..), RealSrcSpan (srcSpanFile), srcSpanStartLine, srcSpanStartCol, srcSpanEndLine, srcSpanEndCol)
+import Data.Text (pack, Text)
+import qualified  Data.Text.Encoding as TH
 
 defaultProgName :: String
 defaultProgName = "dump-hie"
@@ -30,32 +36,55 @@ main = do
     nameCache <- initNameCache 'A' []
     hieFileResult <- readHieFile nameCache filename
     let hieFile = hie_file_result hieFileResult
-    let asts = elems $ getAsts $ hie_asts hieFile
 
-    when (length asts /= 1) $
-        die $ "Panic: " ++ show (length asts) ++ " asts"
+    BL.putStrLn $ encode $ hieFileToJSON hieFile
 
-    let ast = head asts
-    printAST ast
 
-printAST :: HieAST a -> IO ()
-printAST ast_ =
-    printAST' 0 ast_
+hieFileToJSON :: HieFile -> Value
+hieFileToJSON HieFile{..} =
+    object [
+        "path" .= hie_hs_file,
+        "module" .= unpackFS modName,
+        "types" .= Null,
+        "asts" .= object astJson,
+        "exports" .= Null,
+        "src" .= TH.decodeUtf8 hie_hs_src,
+        "entities" .= Null
+    ]
     where
-        printAST' indent ast = do
-            let info = getSourcedNodeInfo $ sourcedNodeInfo ast
-            let infoStrs = map (uncurry strNodeInfo) $ toList info
-            let infoStr = intercalate "," infoStrs
-            putStrLn $ replicate indent ' ' ++ infoStr
-            forM_ (nodeChildren ast) (printAST' (indent+1))
-        strNodeInfo (origin :: NodeOrigin) (info :: NodeInfo a) =
-            intercalate "," $ map
-                (\(annot :: NodeAnnotation) ->
-                    o_str ++ ":"
-                    ++ unpackFS (nodeAnnotType annot) ++ ":"
-                    ++ unpackFS (nodeAnnotConstr annot)
-                )
-                annotations
-            where
-                o_str = case origin of SourceInfo -> "S"; GeneratedInfo -> "G"
-                annotations = Set.toList $ nodeAnnotations info
+        ModuleName modName = moduleName hie_module
+        astMap = getAsts hie_asts
+        astJson = map (\(path, ast) -> (JKey.fromText (lfsToText path), hieAstToJSON ast)) $ toList astMap
+
+hieAstToJSON :: ToJSON a => HieAST a -> Value
+hieAstToJSON Node {..} =
+    object [
+        "info" .= sInfoJson,
+        "span" .= spanToJson nodeSpan,
+        "children" .= map hieAstToJSON nodeChildren
+    ]
+    where
+        spanToJson span_ =
+            object [
+                "path" .= String (pack $ unpackFS $ srcSpanFile span_),
+                "loc" .= [
+                    [srcSpanStartLine span_, srcSpanStartCol span_],
+                    [srcSpanEndLine span_, srcSpanEndCol span_]
+                ]
+            ]
+        sInfoJson = object $ map sourcedInfoToJson $ toList $ getSourcedNodeInfo sourcedNodeInfo
+        sourcedInfoToJson (origin, info) =
+            let key = case origin of SourceInfo -> "source"; GeneratedInfo -> "generated"
+                infoJson = infoToJson info
+            in (JKey.fromString key, infoJson)
+        infoToJson NodeInfo{..} =
+            object [
+                "annotations" .= map annotationToJson (Set.toList nodeAnnotations),
+                "types" .= nodeType,
+                "identifiers" .= Null
+            ]
+        annotationToJson NodeAnnotation{..} =
+             [ pack $ unpackFS nodeAnnotType, pack $ unpackFS nodeAnnotConstr]
+
+lfsToText :: LexicalFastString -> Text
+lfsToText (LexicalFastString fs) = pack $ unpackFS fs

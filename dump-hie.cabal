@@ -16,5 +16,9 @@ executable dump-hie
     build-depends:    base ^>=4.18.3.0
                     , ghc
                     , containers
+                    , aeson
+                    , bytestring
+                    , text
+                    , vector
     hs-source-dirs:   app
     default-language: Haskell2010
